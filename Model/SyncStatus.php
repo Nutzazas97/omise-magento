@@ -6,7 +6,9 @@ use Omise\Payment\Helper\OmiseHelper as Helper;
 use Omise\Payment\Helper\OmiseEmailHelper as EmailHelper;
 use Magento\Sales\Model\Order;
 use Omise\Payment\Model\Config\Cc as Config;
+use Omise\Payment\Model\RefundSyncStatus;
 
+#[\AllowDynamicProperties]
 class SyncStatus
 {
     const STATUS_SUCCESSFUL = 'successful';
@@ -31,12 +33,15 @@ class SyncStatus
     public function __construct(
         Helper $helper,
         EmailHelper $emailHelper,
-        Config $config
+        Config $config,
+        RefundSyncStatus $refundSyncStatus
     ) {
         $this->helper = $helper;
         $this->emailHelper = $emailHelper;
         $this->config = $config;
+        $this->refundSyncStatus = $refundSyncStatus;
     }
+
     /**
      * @param Order $order
      * @return void
@@ -94,33 +99,37 @@ class SyncStatus
     /**
      * @param Order $order
      * @param array $charge
+     * @return void
      */
     private function markPaymentSuccessful($order, $charge)
     {
-        $refunded_amount = isset($charge['refunded_amount'])
-            ? $charge['refunded_amount']
-            : $charge['refunded'];
+        $orderStateNotClosed = $order->getState() != Order::STATE_CLOSED;
 
-        if ($charge['funding_amount'] == $refunded_amount) {
-            $order->addStatusHistoryComment(
-                __(
-                    'Omise: Payment refunded.<br/>An amount %1 %2 has been refunded (manual sync).',
-                    number_format($order->getGrandTotal(), 2, '.', ''),
-                    $order->getOrderCurrencyCode()
-                )
-            );
-
-            $order->save();
-            return;
+        if ($this->refundSyncStatus->shouldRefund($charge) && $orderStateNotClosed) {
+            return $this->refundSyncStatus->refund($order, $charge);
         }
 
-        if ($order->getState() != Order::STATE_COMPLETE && $order->getState() != Order::STATE_PROCESSING) {
+        // Payment will be already processed for the following states
+        $orderStates = [Order::STATE_COMPLETE, Order::STATE_CLOSED, Order::STATE_PROCESSING];
+
+        if (!in_array($order->getState(), $orderStates)) {
+            if ($order->getState() === Order::STATE_CANCELED) {
+                $this->reverseCancelledItems($order);
+            }
+
             $order->setState(Order::STATE_PROCESSING);
             $order->setStatus($order->getConfig()->getStateDefaultStatus(Order::STATE_PROCESSING));
 
-            $invoice = $this->helper->createInvoiceAndMarkAsPaid($order, $charge['id']);
+            $this->helper->createInvoiceAndMarkAsPaid($order, $charge['id']);
             $this->emailHelper->sendInvoiceAndConfirmationEmails($order);
 
+            $payment = $order->getPayment();
+            if ($payment->getAdditionalInformation('session_id')) {
+                $payment->setTransactionId($charge['id']);
+                $payment->setLastTransId($charge['id']);
+                $payment->setAdditionalInformation('charge_id', $charge['id']);
+            }
+            
             $order->addStatusHistoryComment(
                 __(
                     'Omise: Payment successful.<br/>An amount %1 %2 has been paid (manual sync).',
@@ -128,9 +137,24 @@ class SyncStatus
                     $order->getOrderCurrencyCode()
                 )
             );
-        }
 
-        $order->save();
+            $order->save();
+        }
+    }
+
+    /**
+     * Setting the item status from cancelled to ordered to properly set the order status
+     *
+     * @return void
+     */
+    private function reverseCancelledItems($order)
+    {
+        $items = $order->getAllItems();
+
+        foreach ($items as $item) {
+            $item->setQtyCanceled(0);
+            $item->save();
+        }
     }
 
     /**
@@ -147,7 +171,6 @@ class SyncStatus
                 $charge['failure_code']
             )
         )->save();
-        $order->save();
     }
 
     /**
@@ -181,12 +204,8 @@ class SyncStatus
      */
     private function markPaymentReversed($order)
     {
-        $order->addStatusHistoryComment(__('Omise: Payment reversed. (manual sync).'));
-
-        if ($order->getState() != Order::STATE_CANCELED) {
-            $order->setState(Order::STATE_CANCELED)->setStatus(Order::STATE_CANCELED);
-        }
-
-        $order->save();
+        $this->cancelOrderInvoice($order);
+        $order->registerCancellation(__('Omise: Payment reversed. (manual sync).'))
+            ->save();
     }
 }

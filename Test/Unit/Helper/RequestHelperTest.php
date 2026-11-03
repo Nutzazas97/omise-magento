@@ -1,0 +1,128 @@
+<?php
+
+namespace Omise\Payment\Test\Unit\Helper;
+
+use Omise\Payment\Helper\RequestHelper;
+use Omise\Payment\Test\Mock\RequestMockInterface;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+
+#[CoversClass(RequestHelper::class)]
+class RequestHelperTest extends \PHPUnit\Framework\TestCase
+{
+    /**
+     * @var Omise\Payment\Helper\RequestHelper
+     */
+    private $model;
+
+    /**
+     * @var RequestMockInterface
+     */
+    private $requestMock;
+
+    /**
+     * @var \Magento\Framework\HTTP\Header
+     */
+    private $headerMock;
+
+    /**
+     * @var \Omise\Payment\Model\Omise
+     */
+    private $omiseMock;
+
+    /**
+     * This function is called before the test runs.
+     * Ideal for setting the values to variables or objects.
+     * @coversNothing
+     */
+    public function setUp() : void
+    {
+        $this->requestMock = $this->createMock(RequestMockInterface::class);
+        $this->headerMock = $this->createMock('\Magento\Framework\HTTP\Header');
+        $this->omiseMock = $this->createMock('Omise\Payment\Model\Omise');
+        $this->model = new RequestHelper($this->requestMock, $this->headerMock, $this->omiseMock);
+    }
+
+    /**
+     * @covers \Omise\Payment\Helper\RequestHelper
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSendUpaSessionRequestDelegatesToUpaRequest(): void
+    {
+        if (!defined('OMISE_USER_AGENT_SUFFIX')) {
+            define('OMISE_USER_AGENT_SUFFIX', 'OmiseMagento PHPUnit');
+        }
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('Protocol "invalid" not supported');
+
+        $this->model->sendUpaSessionRequest(
+            'invalid://localhost/session',
+            'POST',
+            'skey_test'
+        );
+    }
+
+    /**
+     * Test the function getPlatformType() return correct platform as per user agent
+     *
+     * @dataProvider platformTypeProvider
+     * @covers \Omise\Payment\Helper\RequestHelper
+     * @test
+     */
+    public function getPlatformTypeReturnsCorrectPlatform($platform, $expectedValue)
+    {
+        $headerMock = $this->headerMock;
+        $headerMock->method('getHttpUserAgent')
+            ->willReturn($platform);
+
+        $result = $this->model->getPlatformType();
+        $this->assertEquals($expectedValue, $result);
+    }
+
+    public function platformTypeProvider()
+    {
+        return [
+            ['Android', 'ANDROID'],
+            ['android', 'ANDROID'],
+            ['ipad', 'IOS'],
+            ['IPAD', 'IOS'],
+            ['iPad', 'IOS'],
+            ['iphone', 'IOS'],
+            ['IPHONE', 'IOS'],
+            ['iPhone', 'IOS'],
+            ['ipod', 'IOS'],
+            ['IPOD', 'IOS'],
+            ['iPod', 'IOS'],
+            ['Mozilla', 'WEB'],
+        ];
+    }
+
+    /**
+     * @dataProvider isMobilePlatformDataProvider
+     * @covers \Omise\Payment\Helper\RequestHelper
+     * @test
+     */
+    public function isMobilePlatform($platform, $expected)
+    {
+        $headerMock = $this->headerMock;
+        $headerMock->method('getHttpUserAgent')
+            ->willReturn($platform);
+
+        $result = $this->model->isMobilePlatform();
+        $this->assertEquals($expected, $result);
+    }
+
+    public function isMobilePlatformDataProvider()
+    {
+        return [
+            ['ANDROID', true],
+            ['iPhone', true],
+            ['Mozilla', false]
+        ];
+    }
+}
